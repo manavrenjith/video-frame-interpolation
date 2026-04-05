@@ -1,0 +1,10 @@
+__pycache__
+*.pth
+*.pt
+*.pyc
+data/raw_videos/*
+data/triplets/*
+output_videos/*
+frames/
+.env
+*.egg-info

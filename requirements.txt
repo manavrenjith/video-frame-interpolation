@@ -1,0 +1,7 @@
+customtkinter
+opencv-python
+torch
+torchvision
+numpy
+Pillow
+tqdm

@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 import threading
+import time
 import tkinter as tk
+import traceback
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -56,6 +58,11 @@ class VFIApp:
 		self.thumbnail_image = None
 		self._inspector_request_id = 0
 		self._inspector_loading = False
+		self._processing_active = False
+		self._cancel_event = threading.Event()
+		self._worker_thread = None
+		self._process_start_ts = 0.0
+		self._run_button_reset_id = None
 
 		self.filename_var = tk.StringVar(value="-")
 		self.duration_var = tk.StringVar(value="-")
@@ -65,6 +72,9 @@ class VFIApp:
 		self.output_fps_var = tk.StringVar(value="-")
 		self.output_frames_var = tk.StringVar(value="-")
 		self.inspector_status_var = tk.StringVar(value="")
+		self.progress_status_var = tk.StringVar(value="Idle")
+		self.percent_var = tk.StringVar(value="0%")
+		self.eta_var = tk.StringVar(value="ETA: --")
 		self.root.title("VFI — Video Frame Interpolation")
 		self.root.geometry("900x620")
 		self.root.resizable(False, False)
@@ -73,6 +83,8 @@ class VFIApp:
 		self._center_window(900, 620)
 
 		self.root.grid_rowconfigure(1, weight=1)
+		self.root.grid_rowconfigure(2, weight=0)
+		self.root.grid_rowconfigure(3, weight=0)
 		self.root.grid_columnconfigure(0, weight=1)
 
 		header = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=68)
@@ -111,6 +123,7 @@ class VFIApp:
 		left_panel.grid(row=0, column=0, sticky="nsew")
 		left_panel.grid_propagate(False)
 		left_panel.grid_columnconfigure(0, weight=1)
+		left_panel.grid_rowconfigure(0, weight=1)
 
 		divider = ctk.CTkFrame(content, fg_color=SURFACE2, corner_radius=0, width=1)
 		divider.grid(row=0, column=1, sticky="ns")
@@ -242,19 +255,89 @@ class VFIApp:
 		self.recent_menu.grid(row=9, column=0, sticky="ew", pady=(8, 0))
 		self.recent_var.set(self.recent_files[0] if self.recent_files else NO_RECENT)
 
+		actions_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
+		actions_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 16))
+		actions_frame.grid_columnconfigure(0, weight=1)
+
+		self.run_button = ctk.CTkButton(
+			actions_frame,
+			text="▶  Run Interpolation",
+			height=38,
+			fg_color=ACCENT,
+			hover_color=ACCENT2,
+			text_color=TEXT,
+			command=self._on_run_clicked,
+		)
+		self.run_button.grid(row=0, column=0, sticky="ew")
+
+		self.cancel_button = ctk.CTkButton(
+			actions_frame,
+			text="Cancel",
+			height=34,
+			fg_color=SURFACE2,
+			hover_color="#2A2A32",
+			text_color=TEXT,
+			state="disabled",
+			command=self._on_cancel_clicked,
+		)
+		self.cancel_button.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
 		self._setup_drag_and_drop()
 		self._build_video_inspector(right_panel)
 
-		bottom_bar = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=52)
-		bottom_bar.grid(row=2, column=0, sticky="nsew")
+		log_pane = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=100)
+		log_pane.grid(row=2, column=0, sticky="nsew")
+		log_pane.grid_propagate(False)
+		log_pane.grid_columnconfigure(0, weight=1)
 
-		progress_placeholder = ctk.CTkLabel(
-			bottom_bar,
-			text="Progress bar placeholder",
-			text_color=TEXT_DIM,
-			font=ctk.CTkFont(size=14),
+		self.log_box = ctk.CTkTextbox(
+			log_pane,
+			height=100,
+			fg_color="#0E0E12",
+			text_color=TEXT,
+			font=ctk.CTkFont(family="Consolas", size=12),
+			border_width=1,
+			border_color=SURFACE2,
+			wrap="word",
 		)
-		progress_placeholder.place(relx=0.5, rely=0.5, anchor="center")
+		self.log_box.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
+		self.log_box.configure(state="disabled")
+
+		bottom_bar = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=56)
+		bottom_bar.grid(row=3, column=0, sticky="nsew")
+		bottom_bar.grid_columnconfigure(0, weight=1)
+		bottom_bar.grid_columnconfigure(1, weight=0)
+		bottom_bar.grid_columnconfigure(2, weight=0)
+
+		self.progress_bar = ctk.CTkProgressBar(bottom_bar, mode="determinate", height=14)
+		self.progress_bar.grid(row=0, column=0, columnspan=3, sticky="ew", padx=12, pady=(8, 4))
+		self.progress_bar.set(0)
+
+		self.progress_status_label = ctk.CTkLabel(
+			bottom_bar,
+			textvariable=self.progress_status_var,
+			text_color=TEXT_DIM,
+			font=ctk.CTkFont(size=13, weight="bold"),
+		)
+		self.progress_status_label.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+		self.percent_label = ctk.CTkLabel(
+			bottom_bar,
+			textvariable=self.percent_var,
+			text_color=TEXT,
+			font=ctk.CTkFont(size=13, weight="bold"),
+		)
+		self.percent_label.grid(row=1, column=1, sticky="e", padx=(0, 14), pady=(0, 8))
+
+		self.eta_label = ctk.CTkLabel(
+			bottom_bar,
+			textvariable=self.eta_var,
+			text_color=TEXT_DIM,
+			font=ctk.CTkFont(size=13),
+		)
+		self.eta_label.grid(row=1, column=2, sticky="e", padx=(0, 12), pady=(0, 8))
+
+		self._set_processing_active(False)
 
 	def _center_window(self, width: int, height: int) -> None:
 		self.root.update_idletasks()
@@ -527,6 +610,172 @@ class VFIApp:
 		self.frame_count_var.set("-")
 		self.output_fps_var.set("-")
 		self.output_frames_var.set("-")
+
+	def _on_run_clicked(self) -> None:
+		if self._processing_active:
+			return
+
+		input_path = Path(self.input_path_var.get().strip()).expanduser()
+		output_path = Path(self.output_path_var.get().strip()).expanduser()
+		model_path = Path(self.weights_path_var.get().strip()).expanduser()
+
+		errors: list[str] = []
+		if not input_path.is_file():
+			errors.append(f"Invalid input path: {input_path}")
+		if not output_path.name:
+			errors.append("Output path is empty")
+		elif not output_path.parent.exists():
+			errors.append(f"Output folder does not exist: {output_path.parent}")
+		if not model_path.is_file():
+			errors.append(f"Invalid model path: {model_path}")
+
+		if errors:
+			for message in errors:
+				self._append_log(message)
+			self._flash_run_button_red()
+			return
+
+		self.input_path_var.set(str(input_path))
+		self.output_path_var.set(str(output_path))
+		self.weights_path_var.set(str(model_path))
+		self._cancel_event = threading.Event()
+		self._process_start_ts = time.perf_counter()
+		self.progress_bar.start()
+		self.progress_bar.set(0)
+		self.progress_bar.stop()
+		self.progress_status_var.set("Starting...")
+		self.progress_status_label.configure(text_color=TEXT)
+		self.percent_var.set("0%")
+		self.eta_var.set("ETA: --")
+		self._append_log("Starting interpolation")
+		self._set_processing_active(True)
+
+		self._worker_thread = threading.Thread(
+			target=self._worker,
+			args=(str(input_path), str(output_path), str(model_path)),
+			daemon=True,
+		)
+		self._worker_thread.start()
+
+	def _on_cancel_clicked(self) -> None:
+		if not self._processing_active:
+			return
+		self._cancel_event.set()
+		self.progress_status_var.set("Cancelling...")
+		self.progress_status_label.configure(text_color=TEXT_DIM)
+		self._append_log("Cancellation requested")
+
+	def _worker(self, input_video: str, output_video: str, model_path: str) -> None:
+		from src.predict import interpolate_video
+
+		def progress_cb(done: int, total: int) -> None:
+			if self._cancel_event.is_set():
+				raise InterruptedError("Cancelled")
+			self.root.after(0, lambda d=done, t=total: self._on_progress(d, t))
+
+		try:
+			if self._cancel_event.is_set():
+				raise InterruptedError("Cancelled")
+
+			try:
+				interpolate_video(
+					input_video,
+					output_video,
+					model_path,
+					factor=2,
+					progress_cb=progress_cb,
+					cancel_flag=self._cancel_event,
+				)
+			except TypeError:
+				interpolate_video(input_video, output_video, model_path, 2)
+
+			if self._cancel_event.is_set():
+				raise InterruptedError("Cancelled")
+		except InterruptedError:
+			self.root.after(0, self._on_worker_cancelled)
+			return
+		except Exception:
+			message = traceback.format_exc().rstrip()
+			self.root.after(0, lambda msg=message: self._on_worker_error(msg))
+			return
+
+		self.root.after(0, lambda: self._on_worker_done(output_video))
+
+	def _on_progress(self, done: int, total: int) -> None:
+		if total <= 0:
+			return
+		done = max(0, min(done, total))
+		progress = done / total
+		self.progress_bar.set(progress)
+		self.progress_status_var.set(f"Frame {done}/{total}")
+		self.progress_status_label.configure(text_color=TEXT)
+		self.percent_var.set(f"{int(progress * 100)}%")
+
+		if done > (total * 0.05):
+			elapsed = max(0.001, time.perf_counter() - self._process_start_ts)
+			remaining = (elapsed / done) * (total - done)
+			self.eta_var.set(f"ETA: {self._format_eta(remaining)}")
+		else:
+			self.eta_var.set("ETA: --")
+
+	def _on_worker_done(self, output_video: str) -> None:
+		self._set_processing_active(False)
+		self.progress_bar.set(1.0)
+		self.percent_var.set("100%")
+		self.eta_var.set("ETA: 0s")
+		self.progress_status_var.set("Done ✓")
+		self.progress_status_label.configure(text_color=SUCCESS)
+		self._append_log(f"Done. Output written to: {output_video}")
+
+	def _on_worker_cancelled(self) -> None:
+		self._set_processing_active(False)
+		self.progress_status_var.set("Cancelled")
+		self.progress_status_label.configure(text_color=TEXT_DIM)
+		self._append_log("Cancelled")
+
+	def _on_worker_error(self, message: str) -> None:
+		self._set_processing_active(False)
+		self.progress_status_var.set("Error")
+		self.progress_status_label.configure(text_color=ERROR)
+		self._append_log(message)
+
+	def _set_processing_active(self, active: bool) -> None:
+		self._processing_active = active
+		self.run_button.configure(state="disabled" if active else "normal")
+		self.cancel_button.configure(state="normal" if active else "disabled")
+
+	def _flash_run_button_red(self) -> None:
+		if self._run_button_reset_id is not None:
+			self.root.after_cancel(self._run_button_reset_id)
+		self.run_button.configure(fg_color=ERROR, hover_color=ERROR)
+
+		def _reset() -> None:
+			self._run_button_reset_id = None
+			self.run_button.configure(fg_color=ACCENT, hover_color=ACCENT2)
+
+		self._run_button_reset_id = self.root.after(700, _reset)
+
+	def _append_log(self, message: str) -> None:
+		elapsed = 0.0
+		if self._process_start_ts > 0:
+			elapsed = max(0.0, time.perf_counter() - self._process_start_ts)
+		minutes = int(elapsed // 60)
+		seconds = elapsed - (minutes * 60)
+		prefix = f"[{minutes:02d}:{seconds:04.1f}]"
+
+		lines = message.splitlines() or [message]
+		self.log_box.configure(state="normal")
+		for line in lines:
+			self.log_box.insert("end", f"{prefix} {line}\n")
+		self.log_box.see("end")
+		self.log_box.configure(state="disabled")
+
+	def _format_eta(self, seconds: float) -> str:
+		seconds_int = max(0, int(round(seconds)))
+		minutes, rem = divmod(seconds_int, 60)
+		if minutes > 0:
+			return f"{minutes}m {rem}s"
+		return f"{rem}s"
 
 	def run(self) -> None:
 		self.root.mainloop()

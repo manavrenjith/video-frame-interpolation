@@ -19,3 +19,25 @@ python app.py
 ## Training
 
 Training notes will be added here later.
+
+## Build
+
+### Prerequisites
+
+```bash
+pip install pyinstaller
+```
+
+### Build the executable
+
+```bash
+python scripts/build.py
+```
+
+### Output
+
+The final executable is created at `dist/VFI.exe`.
+
+### Model file requirement
+
+`vfi.pth` must be in `models/` before building.

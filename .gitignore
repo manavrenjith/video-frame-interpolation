@@ -8,3 +8,5 @@ output_videos/*
 frames/
 .env
 *.egg-info
+dist/
+build/

@@ -9,7 +9,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 import cv2
-from PIL import Image
+from PIL import Image, ImageEnhance
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 
@@ -22,6 +22,9 @@ SUCCESS = "#34D399"
 ERROR = "#F87171"
 TEXT = "#F0EFF8"
 TEXT_DIM = "#6B6A7E"
+WARNING = "#FACC15"
+SEPARATOR = "#24242B"
+PADDING = 16
 
 VIDEO_FILE_TYPES = [
 	("Video Files", "*.mp4 *.avi *.mov *.mkv"),
@@ -66,6 +69,13 @@ class VFIApp:
 		self._worker_thread = None
 		self._process_start_ts = 0.0
 		self._run_button_reset_id = None
+		self._run_button_hovered = False
+		self._run_button_visual = "normal"
+		self._progress_target = 0.0
+		self._progress_value = 0.0
+		self._progress_pulse_id = None
+		self._metadata_rows: list[tuple[ctk.CTkLabel, ctk.CTkLabel]] = []
+		self._thumbnail_anim_images: list[ctk.CTkImage] = []
 
 		self.filename_var = tk.StringVar(value="-")
 		self.duration_var = tk.StringVar(value="-")
@@ -80,7 +90,9 @@ class VFIApp:
 		self.eta_var = tk.StringVar(value="ETA: --")
 		self.root.title("VFI — Video Frame Interpolation")
 		self.root.geometry("900x620")
-		self.root.resizable(False, False)
+		self.root.minsize(900, 620)
+		self.root.resizable(True, True)
+		self.root.attributes("-alpha", 0.0)
 		self.root.configure(fg_color=BG)
 
 		self._center_window(900, 620)
@@ -88,6 +100,7 @@ class VFIApp:
 		self.root.grid_rowconfigure(1, weight=1)
 		self.root.grid_rowconfigure(2, weight=0)
 		self.root.grid_rowconfigure(3, weight=0)
+		self.root.grid_rowconfigure(4, weight=0)
 		self.root.grid_columnconfigure(0, weight=1)
 
 		header = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=68)
@@ -101,7 +114,7 @@ class VFIApp:
 			text_color=TEXT,
 			font=ctk.CTkFont(size=32, weight="bold"),
 		)
-		title_label.grid(row=0, column=0, sticky="w", padx=20, pady=14)
+		title_label.grid(row=0, column=0, sticky="w", padx=16, pady=14)
 
 		version_badge = ctk.CTkLabel(
 			header,
@@ -113,7 +126,7 @@ class VFIApp:
 			pady=5,
 			font=ctk.CTkFont(size=13, weight="bold"),
 		)
-		version_badge.grid(row=0, column=1, sticky="e", padx=20, pady=18)
+		version_badge.grid(row=0, column=1, sticky="e", padx=16, pady=16)
 
 		content = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
 		content.grid(row=1, column=0, sticky="nsew")
@@ -137,7 +150,7 @@ class VFIApp:
 		right_panel.grid_rowconfigure(0, weight=1)
 
 		settings_body = ctk.CTkFrame(left_panel, fg_color="transparent")
-		settings_body.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 12))
+		settings_body.grid(row=0, column=0, sticky="nsew", padx=PADDING, pady=(PADDING, 12))
 		settings_body.grid_columnconfigure(0, weight=1)
 
 		input_label = ctk.CTkLabel(
@@ -171,16 +184,19 @@ class VFIApp:
 		)
 		input_browse_btn.grid(row=2, column=0, sticky="ew", pady=(0, 18))
 
+		sep_top = ctk.CTkFrame(settings_body, fg_color=SEPARATOR, height=1, corner_radius=0)
+		sep_top.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+
 		output_label = ctk.CTkLabel(
 			settings_body,
 			text="Output File",
 			text_color=TEXT,
 			font=ctk.CTkFont(size=14, weight="bold"),
 		)
-		output_label.grid(row=3, column=0, sticky="w")
+		output_label.grid(row=4, column=0, sticky="w")
 
 		output_name_row = ctk.CTkFrame(settings_body, fg_color="transparent")
-		output_name_row.grid(row=4, column=0, sticky="ew", pady=(8, 4))
+		output_name_row.grid(row=5, column=0, sticky="ew", pady=(8, 4))
 		output_name_row.grid_columnconfigure(1, weight=1)
 
 		self.output_basename_label = ctk.CTkLabel(
@@ -217,20 +233,23 @@ class VFIApp:
 			justify="left",
 			anchor="w",
 		)
-		self.output_full_path_label.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+		self.output_full_path_label.grid(row=6, column=0, sticky="ew", pady=(0, 2))
 
 		self.output_overwrite_warning_label = ctk.CTkLabel(
 			settings_body,
 			text="Output file already exists — will be overwritten",
-			text_color="#FACC15",
+			text_color=WARNING,
 			font=ctk.CTkFont(size=12, weight="bold"),
 			justify="left",
 			anchor="w",
 		)
-		self.output_overwrite_warning_label.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+		self.output_overwrite_warning_label.grid(row=7, column=0, sticky="ew", pady=(0, 10))
 		self.output_overwrite_warning_label.grid_remove()
 
 		self.output_suffix_var.trace_add("write", self._on_output_suffix_changed)
+
+		sep_mid = ctk.CTkFrame(settings_body, fg_color=SEPARATOR, height=1, corner_radius=0)
+		sep_mid.grid(row=8, column=0, sticky="ew", pady=(0, 12))
 
 		weights_label = ctk.CTkLabel(
 			settings_body,
@@ -238,10 +257,10 @@ class VFIApp:
 			text_color=TEXT,
 			font=ctk.CTkFont(size=14, weight="bold"),
 		)
-		weights_label.grid(row=7, column=0, sticky="w")
+		weights_label.grid(row=9, column=0, sticky="w")
 
 		weights_row = ctk.CTkFrame(settings_body, fg_color="transparent")
-		weights_row.grid(row=8, column=0, sticky="ew", pady=(8, 18))
+		weights_row.grid(row=10, column=0, sticky="ew", pady=(8, 18))
 		weights_row.grid_columnconfigure(0, weight=1)
 
 		self.weights_entry = ctk.CTkEntry(
@@ -272,7 +291,10 @@ class VFIApp:
 			text_color=TEXT,
 			font=ctk.CTkFont(size=14, weight="bold"),
 		)
-		recent_label.grid(row=9, column=0, sticky="w")
+		sep_bottom = ctk.CTkFrame(settings_body, fg_color=SEPARATOR, height=1, corner_radius=0)
+		sep_bottom.grid(row=11, column=0, sticky="ew", pady=(0, 12))
+
+		recent_label.grid(row=12, column=0, sticky="w")
 
 		self.recent_menu = ctk.CTkOptionMenu(
 			settings_body,
@@ -287,11 +309,11 @@ class VFIApp:
 			dropdown_text_color=TEXT,
 			command=self._on_recent_selected,
 		)
-		self.recent_menu.grid(row=10, column=0, sticky="ew", pady=(8, 0))
+		self.recent_menu.grid(row=13, column=0, sticky="ew", pady=(8, 0))
 		self.recent_var.set(self.recent_files[0] if self.recent_files else NO_RECENT)
 
 		actions_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
-		actions_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 16))
+		actions_frame.grid(row=1, column=0, sticky="ew", padx=PADDING, pady=(8, PADDING))
 		actions_frame.grid_columnconfigure(0, weight=1)
 
 		self.run_button = ctk.CTkButton(
@@ -304,6 +326,8 @@ class VFIApp:
 			command=self._on_run_clicked,
 		)
 		self.run_button.grid(row=0, column=0, sticky="ew")
+		self.run_button.bind("<Enter>", self._on_run_button_enter)
+		self.run_button.bind("<Leave>", self._on_run_button_leave)
 
 		self.cancel_button = ctk.CTkButton(
 			actions_frame,
@@ -336,17 +360,24 @@ class VFIApp:
 			border_color=SURFACE2,
 			wrap="word",
 		)
-		self.log_box.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
+		self.log_box.grid(row=0, column=0, sticky="nsew", padx=16, pady=8)
 		self.log_box.configure(state="disabled")
+		self.log_box.tag_config("timestamp", foreground=TEXT_DIM)
+		self.log_box.tag_config("normal", foreground=TEXT)
+		self.log_box.tag_config("error", foreground=ERROR)
+		self.log_box.tag_config("success", foreground=SUCCESS)
+
+		bottom_sep = ctk.CTkFrame(self.root, fg_color=SEPARATOR, corner_radius=0, height=1)
+		bottom_sep.grid(row=3, column=0, sticky="ew")
 
 		bottom_bar = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=56)
-		bottom_bar.grid(row=3, column=0, sticky="nsew")
+		bottom_bar.grid(row=4, column=0, sticky="nsew")
 		bottom_bar.grid_columnconfigure(0, weight=1)
 		bottom_bar.grid_columnconfigure(1, weight=0)
 		bottom_bar.grid_columnconfigure(2, weight=0)
 
-		self.progress_bar = ctk.CTkProgressBar(bottom_bar, mode="determinate", height=14)
-		self.progress_bar.grid(row=0, column=0, columnspan=3, sticky="ew", padx=12, pady=(8, 4))
+		self.progress_bar = ctk.CTkProgressBar(bottom_bar, mode="determinate", height=14, progress_color=ACCENT)
+		self.progress_bar.grid(row=0, column=0, columnspan=3, sticky="ew", padx=16, pady=(8, 4))
 		self.progress_bar.set(0)
 
 		self.progress_status_label = ctk.CTkLabel(
@@ -355,7 +386,7 @@ class VFIApp:
 			text_color=TEXT_DIM,
 			font=ctk.CTkFont(size=13, weight="bold"),
 		)
-		self.progress_status_label.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+		self.progress_status_label.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 8))
 
 		self.percent_label = ctk.CTkLabel(
 			bottom_bar,
@@ -371,9 +402,11 @@ class VFIApp:
 			text_color=TEXT_DIM,
 			font=ctk.CTkFont(size=13),
 		)
-		self.eta_label.grid(row=1, column=2, sticky="e", padx=(0, 12), pady=(0, 8))
+		self.eta_label.grid(row=1, column=2, sticky="e", padx=(0, 16), pady=(0, 8))
 
+		self._start_progress_animation_loop()
 		self._set_processing_active(False)
+		self._animate_window_fade_in()
 
 	def _center_window(self, width: int, height: int) -> None:
 		self.root.update_idletasks()
@@ -382,6 +415,17 @@ class VFIApp:
 		x = (screen_width - width) // 2
 		y = (screen_height - height) // 2
 		self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+	def _animate_window_fade_in(self, duration_ms: int = 400, steps: int = 20) -> None:
+		step_ms = max(1, duration_ms // steps)
+
+		def _tick(step: int) -> None:
+			alpha = min(1.0, step / steps)
+			self.root.attributes("-alpha", alpha)
+			if step < steps:
+				self.root.after(step_ms, lambda: _tick(step + 1))
+
+		_tick(0)
 
 	def _browse_input_video(self) -> None:
 		selected = filedialog.askopenfilename(title="Select Input Video", filetypes=VIDEO_FILE_TYPES)
@@ -508,7 +552,7 @@ class VFIApp:
 			border_color=SURFACE2,
 			corner_radius=10,
 		)
-		inspector_card.grid(row=0, column=0, sticky="nsew", padx=18, pady=16)
+		inspector_card.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
 		inspector_card.grid_columnconfigure(0, weight=1)
 
 		card_title = ctk.CTkLabel(
@@ -579,6 +623,7 @@ class VFIApp:
 				font=ctk.CTkFont(size=13, weight="bold"),
 			)
 			value.grid(row=row_index, column=1, sticky="w", padx=(10, 0), pady=2)
+			self._metadata_rows.append((label, value))
 
 	def _start_video_inspector_load(self, input_path: str) -> None:
 		self._inspector_request_id += 1
@@ -605,6 +650,7 @@ class VFIApp:
 
 	def _set_thumbnail_loading(self) -> None:
 		self.thumbnail_image = None
+		self._thumbnail_anim_images = []
 		self.thumbnail_label.configure(image=None, text="Loading...", text_color=TEXT_DIM)
 
 	def _load_video_inspector_worker(self, request_id: int, input_path: str) -> None:
@@ -657,9 +703,7 @@ class VFIApp:
 			return
 		self._set_inspector_loading(False)
 		self.inspector_status_var.set("")
-
-		self.thumbnail_image = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=thumb.size)
-		self.thumbnail_label.configure(image=self.thumbnail_image, text="")
+		self._animate_thumbnail_fade_in(thumb)
 
 		self.filename_var.set(metadata["filename"])
 		self.duration_var.set(metadata["duration"])
@@ -668,6 +712,7 @@ class VFIApp:
 		self.frame_count_var.set(metadata["frame_count"])
 		self.output_fps_var.set(metadata["output_fps"])
 		self.output_frames_var.set(metadata["output_frames"])
+		self._animate_metadata_rows_in()
 
 	def _on_video_load_failed(self, request_id: int) -> None:
 		if request_id != self._inspector_request_id:
@@ -718,9 +763,10 @@ class VFIApp:
 		self.weights_path_var.set(str(model_path))
 		self._cancel_event = threading.Event()
 		self._process_start_ts = time.perf_counter()
-		self.progress_bar.start()
-		self.progress_bar.set(0)
-		self.progress_bar.stop()
+		self._progress_target = 0.0
+		self._progress_value = 0.0
+		self.progress_bar.set(0.0)
+		self.progress_bar.configure(progress_color=ACCENT)
 		self.progress_status_var.set("Starting...")
 		self.progress_status_label.configure(text_color=TEXT)
 		self.percent_var.set("0%")
@@ -784,7 +830,7 @@ class VFIApp:
 			return
 		done = max(0, min(done, total))
 		progress = done / total
-		self.progress_bar.set(progress)
+		self._progress_target = progress
 		self.progress_status_var.set(f"Frame {done}/{total}")
 		self.progress_status_label.configure(text_color=TEXT)
 		self.percent_var.set(f"{int(progress * 100)}%")
@@ -798,38 +844,129 @@ class VFIApp:
 
 	def _on_worker_done(self, output_video: str) -> None:
 		self._set_processing_active(False)
-		self.progress_bar.set(1.0)
+		self._progress_target = 1.0
 		self.percent_var.set("100%")
 		self.eta_var.set("ETA: 0s")
 		self.progress_status_var.set("Done ✓")
 		self.progress_status_label.configure(text_color=SUCCESS)
+		self._pulse_progress_success()
 		self._append_log(f"Done. Output written to: {output_video}")
 
 	def _on_worker_cancelled(self) -> None:
 		self._set_processing_active(False)
+		self._progress_target = 0.0
 		self.progress_status_var.set("Cancelled")
 		self.progress_status_label.configure(text_color=TEXT_DIM)
 		self._append_log("Cancelled")
 
 	def _on_worker_error(self, message: str) -> None:
 		self._set_processing_active(False)
+		self._progress_target = 0.0
 		self.progress_status_var.set("Error")
 		self.progress_status_label.configure(text_color=ERROR)
 		self._append_log(message)
+
+	def _animate_thumbnail_fade_in(self, thumb: Image.Image) -> None:
+		steps = 8
+		self._thumbnail_anim_images = []
+
+		for i in range(steps + 1):
+			factor = 0.25 + (0.75 * (i / steps))
+			frame = ImageEnhance.Brightness(thumb).enhance(factor)
+			self._thumbnail_anim_images.append(ctk.CTkImage(light_image=frame, dark_image=frame, size=thumb.size))
+
+		def _tick(idx: int) -> None:
+			if idx >= len(self._thumbnail_anim_images):
+				return
+			self.thumbnail_image = self._thumbnail_anim_images[idx]
+			self.thumbnail_label.configure(image=self.thumbnail_image, text="")
+			if idx < len(self._thumbnail_anim_images) - 1:
+				self.root.after(24, lambda: _tick(idx + 1))
+
+		_tick(0)
+
+	def _animate_metadata_rows_in(self) -> None:
+		for label, value in self._metadata_rows:
+			label.configure(text_color=TEXT_DIM)
+			value.configure(text_color=TEXT)
+			label.grid_configure(padx=(20, 0))
+			value.grid_configure(padx=(18, 0))
+
+		def _show_row(index: int) -> None:
+			if index >= len(self._metadata_rows):
+				return
+			label, value = self._metadata_rows[index]
+
+			def _slide(step: int) -> None:
+				offset = max(0, 20 - (step * 4))
+				label.grid_configure(padx=(offset, 0))
+				value.grid_configure(padx=(10 + offset, 0))
+				if step < 5:
+					self.root.after(20, lambda: _slide(step + 1))
+
+			_slide(0)
+			self.root.after(45, lambda: _show_row(index + 1))
+
+		_show_row(0)
+
+	def _start_progress_animation_loop(self) -> None:
+		def _tick() -> None:
+			self._progress_value += (self._progress_target - self._progress_value) * 0.18
+			if abs(self._progress_target - self._progress_value) < 0.001:
+				self._progress_value = self._progress_target
+			self.progress_bar.set(max(0.0, min(1.0, self._progress_value)))
+			self.root.after(16, _tick)
+
+		_tick()
+
+	def _pulse_progress_success(self) -> None:
+		if self._progress_pulse_id is not None:
+			self.root.after_cancel(self._progress_pulse_id)
+		self.progress_bar.configure(progress_color=SUCCESS)
+
+		def _reset() -> None:
+			self._progress_pulse_id = None
+			self.progress_bar.configure(progress_color=ACCENT)
+
+		self._progress_pulse_id = self.root.after(320, _reset)
 
 	def _set_processing_active(self, active: bool) -> None:
 		self._processing_active = active
 		self.run_button.configure(state="disabled" if active else "normal")
 		self.cancel_button.configure(state="normal" if active else "disabled")
+		self._run_button_visual = "processing" if active else "normal"
+		self._apply_run_button_style()
+
+	def _on_run_button_enter(self, _event) -> None:
+		self._run_button_hovered = True
+		self._apply_run_button_style()
+
+	def _on_run_button_leave(self, _event) -> None:
+		self._run_button_hovered = False
+		self._apply_run_button_style()
+
+	def _apply_run_button_style(self) -> None:
+		if self._run_button_visual == "error":
+			self.run_button.configure(fg_color=ERROR, hover_color=ERROR, text_color=TEXT)
+			return
+		if self._run_button_visual == "processing":
+			self.run_button.configure(fg_color="#52525B", hover_color="#52525B", text_color="#D4D4D8")
+			return
+		if self._run_button_hovered:
+			self.run_button.configure(fg_color=ACCENT2, hover_color=ACCENT2, text_color=TEXT)
+		else:
+			self.run_button.configure(fg_color=ACCENT, hover_color=ACCENT2, text_color=TEXT)
 
 	def _flash_run_button_red(self) -> None:
 		if self._run_button_reset_id is not None:
 			self.root.after_cancel(self._run_button_reset_id)
-		self.run_button.configure(fg_color=ERROR, hover_color=ERROR)
+		self._run_button_visual = "error"
+		self._apply_run_button_style()
 
 		def _reset() -> None:
 			self._run_button_reset_id = None
-			self.run_button.configure(fg_color=ACCENT, hover_color=ACCENT2)
+			self._run_button_visual = "processing" if self._processing_active else "normal"
+			self._apply_run_button_style()
 
 		self._run_button_reset_id = self.root.after(700, _reset)
 
@@ -842,9 +979,20 @@ class VFIApp:
 		prefix = f"[{minutes:02d}:{seconds:04.1f}]"
 
 		lines = message.splitlines() or [message]
+
+		def _log_level(text: str) -> str:
+			text_l = text.lower()
+			if any(key in text_l for key in ["done", "written to", "success"]):
+				return "success"
+			if any(key in text_l for key in ["error", "traceback", "invalid", "not writable", "could not"]):
+				return "error"
+			return "normal"
+
 		self.log_box.configure(state="normal")
 		for line in lines:
-			self.log_box.insert("end", f"{prefix} {line}\n")
+			level = _log_level(line)
+			self.log_box.insert("end", f"{prefix} ", ("timestamp",))
+			self.log_box.insert("end", f"{line}\n", (level,))
 		self.log_box.see("end")
 		self.log_box.configure(state="disabled")
 

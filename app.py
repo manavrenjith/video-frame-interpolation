@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -52,6 +53,8 @@ class VFIApp:
 
 		self.input_path_var = tk.StringVar(value="")
 		self.output_path_var = tk.StringVar(value="")
+		self.output_suffix_var = tk.StringVar(value="_interpolated")
+		self.output_basename_var = tk.StringVar(value="-")
 		self.weights_path_var = tk.StringVar(value="models/best.pth")
 		self.recent_var = tk.StringVar(value=NO_RECENT)
 		self.recent_files = self._load_recent_files()
@@ -176,26 +179,58 @@ class VFIApp:
 		)
 		output_label.grid(row=3, column=0, sticky="w")
 
-		self.output_entry = ctk.CTkEntry(
-			settings_body,
-			textvariable=self.output_path_var,
+		output_name_row = ctk.CTkFrame(settings_body, fg_color="transparent")
+		output_name_row.grid(row=4, column=0, sticky="ew", pady=(8, 4))
+		output_name_row.grid_columnconfigure(1, weight=1)
+
+		self.output_basename_label = ctk.CTkLabel(
+			output_name_row,
+			textvariable=self.output_basename_var,
+			text_color=TEXT_DIM,
+			font=ctk.CTkFont(size=13, weight="bold"),
+		)
+		self.output_basename_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+		self.output_suffix_entry = ctk.CTkEntry(
+			output_name_row,
+			textvariable=self.output_suffix_var,
 			height=34,
 			fg_color=SURFACE2,
 			text_color=TEXT,
 			border_color=SURFACE2,
 		)
-		self.output_entry.grid(row=4, column=0, sticky="ew", pady=(8, 8))
+		self.output_suffix_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
 
-		output_browse_btn = ctk.CTkButton(
-			settings_body,
-			text="Browse",
-			height=32,
-			fg_color=ACCENT,
-			hover_color=ACCENT2,
-			text_color=TEXT,
-			command=self._browse_output_file,
+		self.output_extension_label = ctk.CTkLabel(
+			output_name_row,
+			text=".mp4",
+			text_color=TEXT_DIM,
+			font=ctk.CTkFont(size=13, weight="bold"),
 		)
-		output_browse_btn.grid(row=5, column=0, sticky="ew", pady=(0, 18))
+		self.output_extension_label.grid(row=0, column=2, sticky="e")
+
+		self.output_full_path_label = ctk.CTkLabel(
+			settings_body,
+			text="",
+			text_color=TEXT_DIM,
+			font=ctk.CTkFont(size=11),
+			justify="left",
+			anchor="w",
+		)
+		self.output_full_path_label.grid(row=5, column=0, sticky="ew", pady=(0, 2))
+
+		self.output_overwrite_warning_label = ctk.CTkLabel(
+			settings_body,
+			text="Output file already exists — will be overwritten",
+			text_color="#FACC15",
+			font=ctk.CTkFont(size=12, weight="bold"),
+			justify="left",
+			anchor="w",
+		)
+		self.output_overwrite_warning_label.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+		self.output_overwrite_warning_label.grid_remove()
+
+		self.output_suffix_var.trace_add("write", self._on_output_suffix_changed)
 
 		weights_label = ctk.CTkLabel(
 			settings_body,
@@ -203,10 +238,10 @@ class VFIApp:
 			text_color=TEXT,
 			font=ctk.CTkFont(size=14, weight="bold"),
 		)
-		weights_label.grid(row=6, column=0, sticky="w")
+		weights_label.grid(row=7, column=0, sticky="w")
 
 		weights_row = ctk.CTkFrame(settings_body, fg_color="transparent")
-		weights_row.grid(row=7, column=0, sticky="ew", pady=(8, 18))
+		weights_row.grid(row=8, column=0, sticky="ew", pady=(8, 18))
 		weights_row.grid_columnconfigure(0, weight=1)
 
 		self.weights_entry = ctk.CTkEntry(
@@ -237,7 +272,7 @@ class VFIApp:
 			text_color=TEXT,
 			font=ctk.CTkFont(size=14, weight="bold"),
 		)
-		recent_label.grid(row=8, column=0, sticky="w")
+		recent_label.grid(row=9, column=0, sticky="w")
 
 		self.recent_menu = ctk.CTkOptionMenu(
 			settings_body,
@@ -252,7 +287,7 @@ class VFIApp:
 			dropdown_text_color=TEXT,
 			command=self._on_recent_selected,
 		)
-		self.recent_menu.grid(row=9, column=0, sticky="ew", pady=(8, 0))
+		self.recent_menu.grid(row=10, column=0, sticky="ew", pady=(8, 0))
 		self.recent_var.set(self.recent_files[0] if self.recent_files else NO_RECENT)
 
 		actions_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
@@ -284,6 +319,7 @@ class VFIApp:
 
 		self._setup_drag_and_drop()
 		self._build_video_inspector(right_panel)
+		self._refresh_output_naming_ui()
 
 		log_pane = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=100)
 		log_pane.grid(row=2, column=0, sticky="nsew")
@@ -369,13 +405,49 @@ class VFIApp:
 	def _set_input_path(self, input_path: str) -> None:
 		clean_path = str(Path(input_path).expanduser())
 		self.input_path_var.set(clean_path)
-		self.output_path_var.set(self._default_output_from_input(clean_path))
+		self._refresh_output_naming_ui()
 		self._update_recent_files(clean_path)
 		self._start_video_inspector_load(clean_path)
 
-	def _default_output_from_input(self, input_path: str) -> str:
-		in_path = Path(input_path)
-		return str(in_path.with_name(f"{in_path.stem}_interpolated.mp4"))
+	def _truncate_basename(self, basename: str, max_chars: int = 20) -> str:
+		if len(basename) <= max_chars:
+			return basename
+		return f"{basename[: max_chars - 3]}..."
+
+	def _build_output_path_from_parts(self) -> str:
+		input_text = self.input_path_var.get().strip()
+		if not input_text:
+			return ""
+
+		in_path = Path(input_text).expanduser()
+		basename = in_path.stem
+		suffix = self.output_suffix_var.get()
+		return str(in_path.parent / f"{basename}{suffix}.mp4")
+
+	def _refresh_output_naming_ui(self) -> None:
+		input_text = self.input_path_var.get().strip()
+		if not input_text:
+			self.output_basename_var.set("-")
+			self.output_path_var.set("")
+			self.output_full_path_label.configure(text="")
+			self.output_overwrite_warning_label.grid_remove()
+			return
+
+		in_path = Path(input_text).expanduser()
+		self.output_basename_var.set(self._truncate_basename(in_path.stem))
+		self.output_path_var.set(self._build_output_path_from_parts())
+		self.output_full_path_label.configure(text=self.output_path_var.get())
+		self._update_overwrite_warning()
+
+	def _on_output_suffix_changed(self, *_args) -> None:
+		self._refresh_output_naming_ui()
+
+	def _update_overwrite_warning(self) -> None:
+		output_text = self.output_path_var.get().strip()
+		if output_text and Path(output_text).expanduser().exists():
+			self.output_overwrite_warning_label.grid()
+		else:
+			self.output_overwrite_warning_label.grid_remove()
 
 	def _setup_drag_and_drop(self) -> None:
 		try:
@@ -618,14 +690,17 @@ class VFIApp:
 		input_path = Path(self.input_path_var.get().strip()).expanduser()
 		output_path = Path(self.output_path_var.get().strip()).expanduser()
 		model_path = Path(self.weights_path_var.get().strip()).expanduser()
+		output_dir = output_path.parent if output_path.name else Path()
 
 		errors: list[str] = []
 		if not input_path.is_file():
 			errors.append(f"Invalid input path: {input_path}")
 		if not output_path.name:
 			errors.append("Output path is empty")
-		elif not output_path.parent.exists():
-			errors.append(f"Output folder does not exist: {output_path.parent}")
+		elif not output_dir.exists():
+			errors.append(f"Output folder does not exist: {output_dir}")
+		elif not output_dir.is_dir() or not os.access(output_dir, os.W_OK):
+			errors.append(f"Output directory is not writable: {output_dir}")
 		if not model_path.is_file():
 			errors.append(f"Invalid model path: {model_path}")
 
@@ -633,7 +708,10 @@ class VFIApp:
 			for message in errors:
 				self._append_log(message)
 			self._flash_run_button_red()
+			self._update_overwrite_warning()
 			return
+
+		self._update_overwrite_warning()
 
 		self.input_path_var.set(str(input_path))
 		self.output_path_var.set(str(output_path))
